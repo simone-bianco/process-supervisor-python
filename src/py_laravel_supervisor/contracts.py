@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 SCHEMA_VERSION = 1
-ProcessKind = Literal["queue_once", "reverb", "scheduler"]
+ProcessKind = Literal["queue_once", "reverb", "scheduler", "artisan_service"]
+PROCESS_KINDS = {"queue_once", "reverb", "scheduler", "artisan_service"}
 _GROUP_ID = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _QUEUE_NAME = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _CONNECTION = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -149,6 +150,20 @@ class SchedulerSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class ArtisanServiceSpec:
+    command: str
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> "ArtisanServiceSpec":
+        data = _mapping(value, "service")
+        _exact_keys(data, {"command"}, "service")
+        command = _string(data["command"], "service.command")
+        if re.fullmatch(r"[a-z][a-z0-9-]{0,63}:[a-z][a-z0-9:-]{0,127}", command) is None:
+            raise ContractError("service.command must be a single Artisan command name without arguments")
+        return cls(command=command)
+
+
+@dataclass(frozen=True, slots=True)
 class ProcessGroupSpec:
     id: str
     kind: ProcessKind
@@ -158,6 +173,7 @@ class ProcessGroupSpec:
     restart: RestartPolicy
     queue: QueueSpec | None
     scheduler: SchedulerSpec | None
+    service: ArtisanServiceSpec | None = None
 
     @classmethod
     def from_mapping(cls, value: Any, *, max_processes: int = 32) -> "ProcessGroupSpec":
@@ -166,17 +182,20 @@ class ProcessGroupSpec:
         common = {"id", "kind", "generation", "desired_processes", "stop_grace_seconds", "restart_policy", "queue"}
         if kind == "scheduler":
             _exact_keys(data, common | {"scheduler"}, "group")
+        elif kind == "artisan_service":
+            _exact_keys(data, common | {"service"}, "group")
         else:
             _exact_keys(data, common, "group")
         group_id = _string(data["id"], "group.id")
         if _GROUP_ID.fullmatch(group_id) is None:
             raise ContractError("invalid group id")
-        if kind not in {"queue_once", "reverb", "scheduler"}:
+        if kind not in PROCESS_KINDS:
             raise ContractError(f"unsupported process kind for {group_id}")
         desired = _integer(data["desired_processes"], 0, max_processes, "group.desired_processes")
         queue = QueueSpec.from_mapping(data["queue"]) if kind == "queue_once" else None
         scheduler = SchedulerSpec.from_mapping(data["scheduler"]) if kind == "scheduler" else None
-        if kind in {"reverb", "scheduler"}:
+        service = ArtisanServiceSpec.from_mapping(data["service"]) if kind == "artisan_service" else None
+        if kind in {"reverb", "scheduler", "artisan_service"}:
             if data["queue"] is not None:
                 raise ContractError(f"{kind} group cannot define queue options")
             if desired > 1:
@@ -190,6 +209,7 @@ class ProcessGroupSpec:
             restart=RestartPolicy.from_mapping(data["restart_policy"]),
             queue=queue,
             scheduler=scheduler,
+            service=service,
         )
 
 

@@ -19,6 +19,10 @@ def build_group_command(manifest: DesiredManifest, group: ProcessGroupSpec) -> t
         return php, artisan, "reverb:start", "--no-interaction"
     if group.kind == "scheduler":
         return php, artisan, "schedule:run", "--no-interaction"
+    if group.kind == "artisan_service":
+        if group.service is None:
+            raise ValueError("artisan_service group is missing service options")
+        return php, artisan, group.service.command, "--no-interaction"
 
     if group.queue is None:
         raise ValueError("queue_once group is missing queue options")

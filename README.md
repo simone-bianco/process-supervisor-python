@@ -6,13 +6,16 @@ This repository contains the operating-system/runtime layer only. It does not kn
 
 ## What it does
 
-`process-supervisor-python` owns the lifecycle of exact process trees for three workload kinds currently used by the Laravel integration:
+`process-supervisor-python` owns the lifecycle of exact process trees for these workload kinds:
 
 - Queue one-shot workers
 - Scheduler invocations
 - Reverb
+- Artisan singleton services (`artisan_service`): one server-owned Artisan command name, no custom arguments. Stop closes the exact Job after the bounded grace; Restart waits for Job absence before replacing the generation.
 
 The engine persists desired/runtime authority, reconciles a resident supervisor process, uses Windows Job Objects for exact ownership, applies bounded restart/backoff rules, and provides fail-closed recovery when authority becomes inconsistent.
+
+Resident readiness advertises supported `process_kinds`. Adding a kind that the running resident cannot parse is rejected before desired state/gate publication (`RESIDENT_UPGRADE_REQUIRED`); drain and replace that resident first. Recovery reductions cannot change a service command. The engine never adopts an existing external listener.
 
 ```mermaid
 flowchart LR

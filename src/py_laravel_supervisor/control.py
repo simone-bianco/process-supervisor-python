@@ -30,6 +30,10 @@ class ControlError(RuntimeError):
     pass
 
 
+class ResidentUpgradeRequired(ControlError):
+    pass
+
+
 ResidentArgvBuilder = Callable[[Path, str, str, str, str, str], tuple[str, ...]]
 
 
@@ -64,6 +68,16 @@ class SupervisorControl:
             current_raw = self.store.read_json(self.store.paths.desired, required=False)
             current = DesiredManifest.from_mapping(current_raw) if current_raw is not None else None
             gate = self.store.gate(self.installation_id)
+            added_kinds = {group.kind for group in desired.groups} - (
+                {group.kind for group in current.groups} if current is not None else set()
+            )
+            if added_kinds and not self._resident_lock_free():
+                ready = self.store.read_json(self.store.paths.ready, required=False) or {}
+                if not added_kinds.issubset(set(ready.get("process_kinds", []))):
+                    raise ResidentUpgradeRequired(
+                        "The resident engine does not support the configured process kinds. "
+                        "Disable Process Supervisor in Dev Tools, wait for shutdown, then enable it again."
+                    )
             if current is not None:
                 if desired.revision < current.revision:
                     raise ControlError("desired revision cannot move backwards")
@@ -145,6 +159,7 @@ class SupervisorControl:
                 or existing.restart != target.restart
                 or existing.queue != target.queue
                 or existing.scheduler != target.scheduler
+                or existing.service != target.service
             ):
                 return False
             if target.desired_processes > existing.desired_processes:

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from .commands import build_group_command
-from .contracts import ContractError, DesiredManifest, ProcessGroupSpec, SCHEMA_VERSION
+from .contracts import ContractError, DesiredManifest, ProcessGroupSpec, SCHEMA_VERSION, PROCESS_KINDS
 from .events import EventStore
 from .lifecycle import LifecycleLedger, LifecycleState
 from .locks import LockUnavailable, WindowsMutex, mutex_name
@@ -418,6 +418,7 @@ class SupervisorResident:
                 "anchor_job_name": self.anchor_name,
                 "pid": os.getpid(),
                 "desired_revision": desired.revision,
+                "process_kinds": sorted(PROCESS_KINDS),
                 "heartbeat_at": datetime.now(timezone.utc).isoformat(),
             },
         )

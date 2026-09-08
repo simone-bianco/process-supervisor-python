@@ -7,7 +7,7 @@ import platform
 import sys
 from typing import Any
 
-from .control import ControlError, SupervisorControl
+from .control import ControlError, ResidentUpgradeRequired, SupervisorControl
 from .recovery import RecoveryError
 from .resident import RecoveryRequired, SupervisorResident
 
@@ -117,6 +117,8 @@ def _read_json_stdin() -> dict[str, object]:
 
 
 def _error_code(error: BaseException) -> str:
+    if isinstance(error, ResidentUpgradeRequired):
+        return "RESIDENT_UPGRADE_REQUIRED"
     if isinstance(error, RecoveryRequired):
         return "RECOVERY_REQUIRED"
     if isinstance(error, RecoveryError):
