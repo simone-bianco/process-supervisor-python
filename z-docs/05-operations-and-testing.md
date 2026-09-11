@@ -14,7 +14,7 @@ At a high level the runtime may report states such as:
 
 Instances may additionally be `running`, `idle`, `stopping`, `backoff`, `fatal` or `uncertain`.
 
-`idle` is especially important for Queue: it means the one-shot slot is healthy and waiting for its next cycle.
+`idle` means a healthy wait after completion or a requested stop. Queue workers use it between cycles; a successful scheduler run also uses it during its short cooldown before waiting for the next due minute. `backoff` denotes a process failure, not this healthy delay.
 
 ## CLI operations
 
@@ -90,6 +90,8 @@ python -m compileall -q src tests
 ```
 
 The Laravel package installer creates a dedicated application venv and runs the Python `doctor` as part of synchronization.
+
+Source edits do not update the installed venv or an existing resident. To apply engine changes, capture the current desired capacities, disable/drain through the host Dev Tools controls, verify clean ownership, run `php artisan process-supervisor:sync-python --no-interaction`, then re-enable and restore the groups through managed controls. Verify a fresh resident and workload completion after restart.
 
 ## Contributor checklist
 

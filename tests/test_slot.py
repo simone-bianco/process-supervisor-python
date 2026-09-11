@@ -3,13 +3,15 @@ import sys
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import patch
 from pathlib import Path
 
-from py_laravel_supervisor.contracts import DesiredManifest
+from py_laravel_supervisor.contracts import DesiredManifest, SchedulerSpec
 from py_laravel_supervisor.events import EventStore
 from py_laravel_supervisor.runtime_files import RuntimeStore
+from py_laravel_supervisor.resident import SupervisorResident
 from py_laravel_supervisor.slot import ManagedSlot
 from py_laravel_supervisor.windows import close_handle, create_job
 
@@ -124,6 +126,65 @@ class ManagedSlotTest(unittest.TestCase):
                 self.assertTrue(result.process_failure)
                 self.assertEqual(1, len(slot.crashes))
                 self.assertFalse(slot.fatal)
+            finally:
+                slot.close()
+                close_handle(anchor)
+
+    def test_scheduler_completion_does_not_publish_failure_during_healthy_cooldown(self) -> None:
+        for exit_code, runtime_error in [(0, False), (1, False), (0, True)]:
+            with self.subTest(exit_code=exit_code, runtime_error=runtime_error), tempfile.TemporaryDirectory() as temporary:
+                slot, anchor, store, manifest = self._slot(
+                    temporary, mode="empty", watchdog=0,
+                    builder_override=lambda *_: (sys.executable, "-c", f"raise SystemExit({exit_code})"),
+                )
+                slot.replace_group(replace(
+                    slot.group, kind="scheduler", queue=None,
+                    scheduler=SchedulerSpec("* * * * *", "UTC", 0),
+                ))
+                manifest = replace(manifest, groups=(slot.group,))
+                # Freeze the observation inside the 50ms cooldown, instead of racing real time.
+                clock = [1000.0]
+                slot.clock = lambda: clock[0]
+                resident = SupervisorResident(
+                    runtime_root=store.paths.root, installation_id=manifest.installation_id,
+                    incarnation="a" * 32, attempt_id="b" * 32, ready_nonce="c" * 32,
+                )
+                resident.slots[(slot.group.id, 0)] = slot
+                healthy = exit_code == 0 and not runtime_error
+                try:
+                    slot.spawn(manifest)
+                    slot.runtime_error = runtime_error
+                    result = self._until_finished(slot)
+                    self.assertEqual(healthy, result.healthy_completion)
+                    self.assertEqual(not healthy, result.process_failure)
+                    resident._publish_status(manifest, resident._runtime_summary())
+                    status = store.read_json(store.paths.status)
+                    instance = status["groups"][0]["instances"][0]
+                    self.assertEqual("ready" if healthy else "degraded", status["summary"])
+                    self.assertEqual("idle" if healthy else "backoff", instance["state"])
+                    self.assertEqual(None if healthy else "process_failure", instance["last_error_code"])
+                    self.assertEqual(0 if healthy else 1, instance["restart_count"])
+                    self.assertEqual(exit_code, instance["last_exit_code"])
+                    self.assertEqual("clean", slot.ledger.read()["state"])
+                    if healthy:
+                        clock[0] += 0.06
+                        self.assertEqual("stopped", slot.status()["state"])
+                        self.assertEqual("ready", resident._runtime_summary())
+                finally:
+                    slot.close()
+                    close_handle(anchor)
+
+    def test_requested_stop_cooldown_is_not_crash_backoff(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            slot, anchor, _, manifest = self._slot(temporary, mode="empty", watchdog=0)
+            slot.clock = lambda: 1000.0
+            try:
+                slot.spawn(manifest)
+                slot.request_stop()
+                result = self._until_finished(slot)
+                self.assertTrue(result.healthy_completion)
+                self.assertEqual("idle", slot.status()["state"])
+                self.assertEqual(0, slot.restart_count)
             finally:
                 slot.close()
                 close_handle(anchor)

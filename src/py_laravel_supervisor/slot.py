@@ -414,10 +414,10 @@ class ManagedSlot:
             if healthy and not was_stopping and self.group.kind == "queue_once" and self.group.queue is not None:
                 delay = max(0.25, float(self.group.queue.sleep_seconds)) if outcome == "empty" else 0.05
                 self.next_spawn_at = finished_at + delay
-                self.healthy_recycle_pending = True
             else:
                 self.next_spawn_at = finished_at + 0.05
-                self.healthy_recycle_pending = False
+            # Successful scheduler runs and requested stops also wait without a crash.
+            self.healthy_recycle_pending = True
             return SlotTick(healthy_completion=True)
         self._record_crash(finished_at)
         return SlotTick(process_failure=True)

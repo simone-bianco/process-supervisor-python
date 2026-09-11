@@ -61,6 +61,8 @@ Important behavior:
 - a resident restart in the same claimed minute does not duplicate the run;
 - missed minutes are intentionally not backfilled.
 
+A successful run enters a short healthy `idle` cooldown, then waits for the next due minute. It must not publish `backoff`, increment crash restarts or degrade the resident. Exit code 0 alone is insufficient when a runtime/protocol error was observed; those failures still use crash backoff.
+
 ## Reverb
 
 Reverb is a long-lived workload.
