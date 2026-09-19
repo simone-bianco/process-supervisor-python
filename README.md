@@ -84,6 +84,7 @@ Start here if you know very little about the implementation:
 4. [`z-docs/03-recovery-and-safety.md`](z-docs/03-recovery-and-safety.md) — recovery, backups and fail-closed behavior
 5. [`z-docs/04-workload-kinds.md`](z-docs/04-workload-kinds.md) — Queue, Scheduler and Reverb
 6. [`z-docs/05-operations-and-testing.md`](z-docs/05-operations-and-testing.md) — CLI, states, testing and troubleshooting
+7. [`z-docs/06-owned-mcp-frames.md`](z-docs/06-owned-mcp-frames.md) — already-owned Windows byte channel for MCP framing; no launcher or application authority
 
 ## Package family
 

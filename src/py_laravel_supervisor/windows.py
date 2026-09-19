@@ -58,6 +58,14 @@ if os.name == "nt":
     class STARTUPINFOEXW(ctypes.Structure):
         _fields_ = [("StartupInfo", STARTUPINFOW), ("lpAttributeList", ctypes.c_void_p)]
 
+    class SECURITY_CAPABILITIES(ctypes.Structure):
+        _fields_ = [
+            ("AppContainerSid", ctypes.c_void_p),
+            ("Capabilities", ctypes.c_void_p),
+            ("CapabilityCount", DWORD),
+            ("Reserved", DWORD),
+        ]
+
     class PROCESS_INFORMATION(ctypes.Structure):
         _fields_ = [
             ("hProcess", HANDLE),
@@ -201,8 +209,14 @@ def create_job(
     *,
     inheritable: bool = False,
     allow_breakaway: bool = False,
+    process_limit: int | None = None,
+    memory_bytes: int | None = None,
 ) -> int:
     _ensure_windows()
+    if process_limit is not None and not 1 <= process_limit <= 64:
+        raise WindowsProcessError("invalid Job process limit")
+    if memory_bytes is not None and not 64 * 1024 * 1024 <= memory_bytes <= 4 * 1024 * 1024 * 1024:
+        raise WindowsProcessError("invalid Job memory limit")
     security = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), None, bool(inheritable))
     handle = _kernel32.CreateJobObjectW(ctypes.byref(security), name)
     if not handle:
@@ -214,6 +228,12 @@ def create_job(
     limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
     if allow_breakaway:
         limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    if process_limit is not None:
+        limits.BasicLimitInformation.LimitFlags |= 0x00000008  # JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        limits.BasicLimitInformation.ActiveProcessLimit = process_limit
+    if memory_bytes is not None:
+        limits.BasicLimitInformation.LimitFlags |= 0x00000200  # JOB_OBJECT_LIMIT_JOB_MEMORY
+        limits.JobMemoryLimit = memory_bytes
     if not _kernel32.SetInformationJobObject(
         handle,
         JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -365,6 +385,7 @@ class ManagedWindowsProcess:
     job_handle: int | None
     stdout_fd: int | None
     stderr_fd: int | None
+    stdin_fd: int | None = None
 
     def poll(self) -> int | None:
         result = int(_kernel32.WaitForSingleObject(HANDLE(self.process_handle), 0))
@@ -390,6 +411,12 @@ class ManagedWindowsProcess:
         terminate_job(self.job_handle)
 
     def close(self) -> None:
+        if self.stdin_fd is not None:
+            try:
+                os.close(self.stdin_fd)
+            except OSError:
+                pass
+            self.stdin_fd = None
         if self.stdout_fd is not None:
             try:
                 os.close(self.stdout_fd)
@@ -418,6 +445,9 @@ def spawn_process(
     capture_output: bool = True,
     create_new_process_group: bool = True,
     breakaway_from_parent_job: bool = False,
+    stdin_pipe: bool = False,
+    sandbox_sid: int | None = None,
+    exact_environment: bool = False,
     _post_create_hook: Callable[[int], None] | None = None,
 ) -> ManagedWindowsProcess:
     _ensure_windows()
@@ -426,17 +456,23 @@ def spawn_process(
         raise WindowsProcessError("command is required")
     if cleanup_job_handle not in job_handles:
         raise WindowsProcessError("cleanup Job Object must be part of the process Job list")
-    stdout_read = stdout_write = stderr_read = stderr_write = stdin_handle = None
+    if sandbox_sid is not None and (not exact_environment or inherited_handles or breakaway_from_parent_job):
+        raise WindowsProcessError("sandbox spawn requires an exact environment and private handles")
+    stdout_read = stdout_write = stderr_read = stderr_write = stdin_handle = stdin_write = None
+    owned_fds: list[int] = []
     process_handle = thread_handle = None
     attribute_buffer = None
     attr_pointer = None
     try:
         security = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), None, True)
-        stdin_handle = _kernel32.CreateFileW(
-            "NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, ctypes.byref(security), OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None
-        )
-        if not stdin_handle:
-            raise _win_error("unable to open NUL stdin")
+        if stdin_pipe:
+            stdin_handle, stdin_write = _create_pipe(security, parent_reads=False)
+        else:
+            stdin_handle = _kernel32.CreateFileW(
+                "NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, ctypes.byref(security), OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, None
+            )
+            if not stdin_handle:
+                raise _win_error("unable to open NUL stdin")
         if capture_output:
             stdout_read, stdout_write = _create_pipe(security)
             stderr_read, stderr_write = _create_pipe(security)
@@ -445,7 +481,7 @@ def spawn_process(
             stderr_write = _open_nul_write(security)
 
         inheritable = [int(stdin_handle), int(stdout_write), int(stderr_write), *(inherited_handles or [])]
-        attribute_count = 1 + (1 if job_handles else 0)
+        attribute_count = 1 + (1 if job_handles else 0) + (1 if sandbox_sid is not None else 0)
         size = SIZE_T()
         _kernel32.InitializeProcThreadAttributeList(None, attribute_count, 0, ctypes.byref(size))
         attribute_buffer = ctypes.create_string_buffer(size.value)
@@ -465,6 +501,13 @@ def spawn_process(
             ):
                 raise _win_error("unable to assign process Job Object list")
 
+        if sandbox_sid is not None:
+            security_capabilities = SECURITY_CAPABILITIES(sandbox_sid, None, 0, 0)
+            if not _kernel32.UpdateProcThreadAttribute(
+                attr_pointer, 0, 0x00020009, ctypes.byref(security_capabilities), ctypes.sizeof(security_capabilities), None, None
+            ):
+                raise _win_error("unable to configure AppContainer isolation")
+
         startup = STARTUPINFOEXW()
         startup.StartupInfo.cb = ctypes.sizeof(startup)
         startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES
@@ -474,7 +517,7 @@ def spawn_process(
         startup.lpAttributeList = attr_pointer
         info = PROCESS_INFORMATION()
         command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(command))
-        env_block = _environment_block(environment)
+        env_block = _environment_block(environment, inherit_os_defaults=not exact_environment)
         env_buffer = ctypes.create_unicode_buffer(env_block)
         flags = CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW
         if create_new_process_group:
@@ -510,9 +553,20 @@ def spawn_process(
         close_handle(int(stderr_write))
         stderr_write = None
         stdout_fd = _fd_from_handle(stdout_read) if capture_output and stdout_read else None
+        if stdout_fd is not None:
+            owned_fds.append(stdout_fd)
+            stdout_read = None
         stderr_fd = _fd_from_handle(stderr_read) if capture_output and stderr_read else None
-        stdout_read = stderr_read = None
-        return ManagedWindowsProcess(pid, process_handle, exact_job_handle, stdout_fd, stderr_fd)
+        if stderr_fd is not None:
+            owned_fds.append(stderr_fd)
+            stderr_read = None
+        stdin_fd = _fd_from_handle(stdin_write, writing=True) if stdin_write else None
+        if stdin_fd is not None:
+            owned_fds.append(stdin_fd)
+            stdin_write = None
+        result = ManagedWindowsProcess(pid, process_handle, exact_job_handle, stdout_fd, stderr_fd, stdin_fd)
+        owned_fds.clear()
+        return result
     except BaseException:
         if process_handle:
             _contain_failed_spawn(process_handle, cleanup_job_handle)
@@ -522,7 +576,9 @@ def spawn_process(
     finally:
         if attr_pointer:
             _kernel32.DeleteProcThreadAttributeList(attr_pointer)
-        for handle in (stdin_handle, stdout_read, stdout_write, stderr_read, stderr_write):
+        for fd in owned_fds:
+            os.close(fd)
+        for handle in (stdin_handle, stdin_write, stdout_read, stdout_write, stderr_read, stderr_write):
             close_handle(int(handle) if handle else None)
 
 
@@ -594,12 +650,12 @@ def start_pipe_reader(
     return thread
 
 
-def _create_pipe(security: SECURITY_ATTRIBUTES) -> tuple[int, int]:
+def _create_pipe(security: SECURITY_ATTRIBUTES, *, parent_reads: bool = True) -> tuple[int, int]:
     read_handle = HANDLE()
     write_handle = HANDLE()
     if not _kernel32.CreatePipe(ctypes.byref(read_handle), ctypes.byref(write_handle), ctypes.byref(security), 0):
         raise _win_error("unable to create child pipe")
-    if not _kernel32.SetHandleInformation(read_handle, HANDLE_FLAG_INHERIT, 0):
+    if not _kernel32.SetHandleInformation(read_handle if parent_reads else write_handle, HANDLE_FLAG_INHERIT, 0):
         close_handle(read_handle.value)
         close_handle(write_handle.value)
         raise _win_error("unable to make parent pipe handle non-inheritable")
@@ -618,11 +674,11 @@ def _open_nul_write(security: SECURITY_ATTRIBUTES) -> int:
     return int(handle)
 
 
-def _fd_from_handle(handle: int) -> int:
-    return msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+def _fd_from_handle(handle: int, *, writing: bool = False) -> int:
+    return msvcrt.open_osfhandle(handle, (os.O_WRONLY if writing else os.O_RDONLY) | os.O_BINARY)
 
 
-def _environment_block(environment: Mapping[str, str]) -> str:
+def _environment_block(environment: Mapping[str, str], *, inherit_os_defaults: bool = True) -> str:
     values = dict(environment)
     for key in (
         "SystemRoot",
@@ -634,7 +690,7 @@ def _environment_block(environment: Mapping[str, str]) -> str:
         "USERPROFILE",
         "HOME",
     ):
-        if key not in values and key in os.environ:
+        if inherit_os_defaults and key not in values and key in os.environ:
             values[key] = os.environ[key]
     ordered = sorted(values.items(), key=lambda pair: pair[0].lower())
     return "\0".join(f"{key}={value}" for key, value in ordered) + "\0\0"
