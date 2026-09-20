@@ -7,7 +7,6 @@ import unittest
 import uuid
 from pathlib import Path
 
-from py_laravel_supervisor.appcontainer import AppContainerProfile
 from py_laravel_supervisor.duplex import DuplexChannel
 from py_laravel_supervisor.windows import (
     WindowsProcessError, close_handle, create_job, job_active_processes, spawn_process,
@@ -15,7 +14,7 @@ from py_laravel_supervisor.windows import (
 
 
 @unittest.skipUnless(os.name == "nt", "Windows isolation fixture")
-class McpSandboxTest(unittest.TestCase):
+class McpOwnedProcessTest(unittest.TestCase):
     def setUp(self):
         self.node = shutil.which("node.exe")
         self.assertIsNotNone(self.node, "the P0 Node fixture requires an installed Node executable")
@@ -27,9 +26,6 @@ class McpSandboxTest(unittest.TestCase):
         self.state.mkdir()
         self.denied = self.root / "other-owner.txt"
         self.denied.write_text("must-not-be-readable", encoding="utf8")
-        self.profile = AppContainerProfile("localgpt." + uuid.uuid4().hex)
-        self.profile.grant_directory(self.code)
-        self.profile.grant_directory(self.state, writable=True)
         self.job = create_job("Local\\McpP0-" + uuid.uuid4().hex)
         self.channel = None
         self.process = None
@@ -45,7 +41,6 @@ class McpSandboxTest(unittest.TestCase):
             self.assertEqual(0, job_active_processes(self.job))
         finally:
             close_handle(self.job)
-            self.profile.close()
             self.temp.cleanup()
 
     def start(self, source, **limits):
@@ -59,12 +54,12 @@ class McpSandboxTest(unittest.TestCase):
         self.process = spawn_process(
             [self.node, '--preserve-symlinks', '--preserve-symlinks-main', str(fixture)], cwd=self.state, environment=environment,
             job_handles=[self.job], exact_job_handle=self.job, cleanup_job_handle=self.job,
-            stdin_pipe=True, sandbox_sid=self.profile.sid, exact_environment=True,
+            stdin_pipe=True, exact_environment=True,
         )
         self.channel = DuplexChannel(self.process, **limits)
         return self.channel
 
-    def test_node_duplex_isolation_and_no_environment_leak(self):
+    def test_trusted_node_access_and_no_ambient_environment_leak(self):
         os.environ['MCP_P0_SECRET'] = 'not-inherited'
         self.addCleanup(os.environ.pop, 'MCP_P0_SECRET', None)
         channel = self.start("""
@@ -83,12 +78,12 @@ require('readline').createInterface({input: process.stdin}).on('line', line => {
         finally:
             del os.environ['MCP_P0_SECRET']
         self.assertEqual("hello ü", result["echo"])
-        self.assertIn(result["read"], ["EACCES", "EPERM"])
-        self.assertIn(result["write"], ["EACCES", "EPERM"])
+        self.assertEqual("allowed", result["read"])
+        self.assertEqual("allowed", result["write"])
         self.assertIsNone(result["secret"])
         self.assertEqual("hello ü", (self.state / "owned.txt").read_text(encoding="utf8"))
 
-    def test_network_access_is_denied_by_os_not_node_flags(self):
+    def test_trusted_local_process_can_connect_to_a_local_listener(self):
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
@@ -107,13 +102,9 @@ require('readline').createInterface({input:process.stdin}).on('line', line => {
 });
 """)
             result = json.loads(channel.exchange(json.dumps({"port": listener.getsockname()[1]}).encode() + b"\n", timeout=5))
-            self.assertNotEqual("allowed", result)
-            with self.assertRaises(socket.timeout):
-                listener.accept()
-            # Windows AppContainer WFP may fail as access denied or connection timeout.
-            # The live listener control plus zero accepted connections proves denial,
-            # rather than treating a timeout to an unreachable external host as a pass.
-            self.assertIn(result, ["EACCES", "EPERM", "ETIMEDOUT"])
+            self.assertEqual("allowed", result)
+            accepted, _ = listener.accept()
+            accepted.close()
         finally:
             listener.close()
 

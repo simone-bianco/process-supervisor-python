@@ -5,12 +5,12 @@ import tempfile
 import unittest
 import uuid
 
-from py_laravel_supervisor.mcp_utility import run_isolated_utility
+from py_laravel_supervisor.mcp_utility import run_owned_utility
 from py_laravel_supervisor.windows import WindowsProcessError
 
 
-@unittest.skipUnless(os.name == 'nt', 'Windows isolated utility fixture')
-class IsolatedUtilityTest(unittest.TestCase):
+@unittest.skipUnless(os.name == 'nt', 'Windows owned utility fixture')
+class OwnedUtilityTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='mcp-utility-test-')
         self.addCleanup(self.temp.cleanup)
@@ -28,7 +28,7 @@ class IsolatedUtilityTest(unittest.TestCase):
     def run_code(self, source, **limits):
         fixture = self.code / 'main.cjs'
         fixture.write_text(source)
-        return run_isolated_utility([self.node, '--preserve-symlinks', '--preserve-symlinks-main', str(fixture)],
+        return run_owned_utility([self.node, '--preserve-symlinks', '--preserve-symlinks-main', str(fixture)],
                                     cwd=self.state, read_directories=[self.code], write_directories=[self.state],
                                     environment=self.env, owner_id=uuid.uuid4().hex, **limits)
 

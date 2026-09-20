@@ -12,12 +12,11 @@ from unittest.mock import patch
 import uuid
 
 from py_laravel_supervisor import mcp_utility
-from py_laravel_supervisor.appcontainer import AppContainerProfile
-from py_laravel_supervisor.mcp_utility import run_isolated_utility
+from py_laravel_supervisor.mcp_utility import run_owned_utility
 from py_laravel_supervisor.windows import WindowsProcessError
 
 
-@unittest.skipUnless(os.name == "nt", "Windows isolated utility regression")
+@unittest.skipUnless(os.name == "nt", "Windows owned utility regression")
 class McpUtilityAdversarialTest(unittest.TestCase):
     def setUp(self):
         self.node = shutil.which("node.exe")
@@ -34,14 +33,14 @@ class McpUtilityAdversarialTest(unittest.TestCase):
     def run_source(self, source, *, environment=None, **limits):
         script = self.code / "fixture.cjs"
         script.write_text(source, encoding="utf-8")
-        return run_isolated_utility([self.node, "--preserve-symlinks", "--preserve-symlinks-main", str(script)],
+        return run_owned_utility([self.node, "--preserve-symlinks", "--preserve-symlinks-main", str(script)],
                                     cwd=self.state, read_directories=[self.code], write_directories=[self.state],
                                     environment=self.environment if environment is None else environment,
                                     owner_id=uuid.uuid4().hex, **limits)
 
-    def test_disallowed_preload_and_secret_env_are_rejected_before_os_profile_creation(self):
+    def test_disallowed_preload_and_secret_env_are_rejected_before_process_creation(self):
         for name in ["NODE_OPTIONS", "NODE_PATH", "NPM_CONFIG_USERCONFIG", "MCP_API_TOKEN"]:
-            with self.subTest(name=name), patch.object(mcp_utility, "AppContainerProfile") as constructor:
+            with self.subTest(name=name), patch.object(mcp_utility, "create_job") as constructor:
                 with self.assertRaisesRegex(WindowsProcessError, "explicit environment"):
                     self.run_source("require('fs').writeFileSync('side-effect','bad');", environment={**self.environment, name: "forbidden"})
                 constructor.assert_not_called()
@@ -76,26 +75,6 @@ class McpUtilityAdversarialTest(unittest.TestCase):
         self.assertEqual(b"isolated", result.stdout)
         self.assertFalse(marker.exists())
 
-    def test_directory_junction_is_rejected_without_changing_target_file_access(self):
-        target = self.root / "other-owner"
-        target.mkdir()
-        sentinel = target / "protected.txt"
-        sentinel.write_text("outside-owner", encoding="utf-8")
-        junction = self.root / "redirect"
-        executable = str(Path(os.environ["SystemRoot"]) / "System32" / "cmd.exe")
-        # This explicit test-owned junction checks OS reparse semantics; it is never a user-input shell surface.
-        created = subprocess.run([executable, "/d", "/c", "mklink", "/J", str(junction), str(target)],
-                                 timeout=5, capture_output=True, text=True)
-        self.assertEqual(0, created.returncode, "The Windows fixture requires directory junction support.")
-        profile = AppContainerProfile("localgpt." + uuid.uuid4().hex)
-        try:
-            with self.assertRaisesRegex(WindowsProcessError, "reparse"):
-                profile.grant_directory(junction, writable=True)
-            self.assertEqual("outside-owner", sentinel.read_text(encoding="utf-8"))
-        finally:
-            profile.close()
-            if junction.exists():
-                junction.rmdir()
 
 
 if __name__ == "__main__":

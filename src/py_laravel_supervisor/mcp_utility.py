@@ -1,4 +1,4 @@
-"""Finite isolated utilities on the existing Windows process owner; no daemon or RPC parser."""
+"""Finite trusted utilities on the existing Windows process owner; no OS sandbox."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,35 +10,37 @@ import time
 from typing import Mapping
 import uuid
 
-from .appcontainer import AppContainerProfile
 from .windows import WindowsProcessError, close_handle, create_job, job_active_processes, spawn_process
 
 
 @dataclass(frozen=True)
-class IsolatedUtilityResult:
+class OwnedUtilityResult:
     exit_code: int
     stdout: bytes
     stderr_bytes: int
 
 
-def run_isolated_utility(
+def run_owned_utility(
     command: list[str], *, cwd: Path, read_directories: list[Path], write_directories: list[Path],
     environment: Mapping[str, str], timeout: float = 120, stdout_limit: int = 262144,
     stderr_limit: int = 65536, memory_bytes: int = 1024 * 1024 * 1024, owner_id: str,
-) -> IsolatedUtilityResult:
-    """Caller owns install admission and the directories. No inherited secrets, network or child launch."""
+) -> OwnedUtilityResult:
+    """Caller owns admission. Directory roles are contract checks, not OS ACLs.
+
+    Minimal environment, bounded output and exact Job cleanup remain enforced.
+    Network/filesystem access has the same authority as the trusted host user.
+    """
     if not command or not Path(command[0]).is_absolute() or not 0 < timeout <= 240:
-        raise WindowsProcessError('invalid isolated utility admission')
+        raise WindowsProcessError('invalid owned utility admission')
     if not 1024 <= stdout_limit <= 8 * 1024 * 1024 or not 0 <= stderr_limit <= 1024 * 1024:
-        raise WindowsProcessError('invalid isolated utility output bounds')
+        raise WindowsProcessError('invalid owned utility output bounds')
     if cwd not in write_directories or set(read_directories) & set(write_directories):
-        raise WindowsProcessError('isolated utility directories must have explicit disjoint roles')
+        raise WindowsProcessError('owned utility directories must have explicit disjoint roles')
     allowed_environment = {'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PATH'}
     if set(environment) - allowed_environment or (allowed_environment - {'PATH'}) - set(environment):
-        raise WindowsProcessError('isolated utility requires a complete explicit environment')
+        raise WindowsProcessError('owned utility requires a complete explicit environment')
     if not isinstance(owner_id, str) or re.fullmatch(r'[a-f0-9]{32}', owner_id) is None:
         raise WindowsProcessError('invalid utility owner identity')
-    profile = AppContainerProfile('localgpt.' + owner_id)
     job = None
     process = None
     readers: list[threading.Thread] = []
@@ -46,14 +48,10 @@ def run_isolated_utility(
     stderr_bytes = 0
     failed = threading.Event()
     try:
-        for directory in read_directories:
-            profile.grant_directory(directory)
-        for directory in write_directories:
-            profile.grant_directory(directory, writable=True)
         job = create_job('Local\\McpUtility-' + owner_id, process_limit=1, memory_bytes=memory_bytes)
         process = spawn_process(
             command, cwd=cwd, environment=environment, job_handles=[job], exact_job_handle=job,
-            cleanup_job_handle=job, sandbox_sid=profile.sid, exact_environment=True,
+            cleanup_job_handle=job, exact_environment=True,
         )
 
         def drain(fd: int, output: bool):
@@ -83,25 +81,24 @@ def run_isolated_utility(
         deadline = time.monotonic() + timeout
         while process.poll() is None:
             if failed.wait(0.02):
-                raise WindowsProcessError('isolated utility exceeded its output budget')
+                raise WindowsProcessError('owned utility exceeded its output budget')
             if time.monotonic() >= deadline:
-                raise WindowsProcessError('isolated utility deadline exceeded')
+                raise WindowsProcessError('owned utility deadline exceeded')
         for reader in readers:
             reader.join(timeout=1)
         if failed.is_set() or any(reader.is_alive() for reader in readers) or job_active_processes(job) != 0:
-            raise WindowsProcessError('isolated utility quiescence or output integrity is unproven')
-        return IsolatedUtilityResult(process.poll(), bytes(stdout), stderr_bytes)
+            raise WindowsProcessError('owned utility quiescence or output integrity is unproven')
+        return OwnedUtilityResult(process.poll(), bytes(stdout), stderr_bytes)
     finally:
         if process is not None:
             process.terminate_tree()
             process.wait(2)
         if job is not None and job_active_processes(job) != 0:
-            # Keep evidence/profile alive rather than declaring safe cleanup.
+            # Retain failure evidence rather than declaring safe cleanup.
             close_handle(job)
-            raise WindowsProcessError('isolated utility tree did not terminate')
+            raise WindowsProcessError('owned utility tree did not terminate')
         for reader in readers:
             reader.join(timeout=1)
         if process is not None:
             process.close()
         close_handle(job)
-        profile.close()

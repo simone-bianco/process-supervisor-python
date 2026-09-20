@@ -2,7 +2,7 @@
 
 `py_laravel_supervisor.framed_channel.FramedStdioChannel` is a raw framed byte API over an **already owned** `ManagedWindowsProcess`. It reuses `DuplexChannel`'s bounded writer/stderr handling and exact Job cleanup. It does not launch a child, parse JSON-RPC, authenticate an Agent, select a deployment, reconnect or retry a request.
 
-The control plane must own admission and supply a process with its original stdin/stdout/stderr handles, exact Job and sandbox. `StdioProtocolClient` in the gateway remains the MCP protocol owner; it determines whether a write is a notification, whether to read more than one frame and whether an incoming frame matches the original call.
+The control plane must own admission and supply a process with its original stdin/stdout/stderr handles and exact Job. Under approved Q16 (2026-09-19), local MCP code is trusted and uses the host Windows token; the Job controls lifecycle, not OS confidentiality. `StdioProtocolClient` in the gateway remains the MCP protocol owner; it determines whether a write is a notification, whether to read more than one frame and whether an incoming frame matches the original call.
 
 ## Contract
 
@@ -27,6 +27,6 @@ The host must serialize each protocol interaction across the separate methods. C
 
 ## Verification
 
-`tests/test_mcp_framed_channel.py` exercises the real Windows process owner and AppContainer with test-owned Node scripts/directories. It covers notification-only writes; multiple response frames; exact Unicode bytes; partial output and idle state including a deliberately paused reader; complete trailing frames; stdin backpressure; timeouts without replay; malformed input; EOF; competing readers; and cleanup failure followed by exact-owner retry.
+`tests/test_mcp_framed_channel.py` exercises the real Windows process owner with stock Node and test-owned directories. It covers notification-only writes; multiple response frames; exact Unicode bytes; partial output and idle state including a deliberately paused reader; complete trailing frames; stdin backpressure; timeouts without replay; malformed input; EOF; competing readers; and cleanup failure followed by exact-owner retry. The current test_mcp_* suite has 69 passing tests, including bounded waiting for asynchronous original-Job termination. AppContainer and patched Node are no longer dependencies.
 
 At the verified 2026-09-17 snapshot, all ten new tests and all 37 `test_mcp_*.py` tests passed with no skips. This is source-level Windows evidence, not a deployment of the resident or proof that Node/Docker installation, workspace binding, secrets, HTTP/native gateway delivery or Tasks are fully integrated. The code did not change `duplex.py`, `windows.py` or `appcontainer.py`. Host integration must verify the executed module path and preserve the original binding; synchronize/restart a resident only when that resident actually consumes changed source under its own operational gate.

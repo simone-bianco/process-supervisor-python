@@ -1,6 +1,6 @@
 """Finite real-Windows acceptance of a raw framed channel, not an MCP parser or launcher.
 
-Each fixture owns its Job, AppContainer, child and temporary directories. No
+Each fixture owns its Job, child and temporary directories. No
 Docker, application service, network or downloaded package is executed.
 """
 from __future__ import annotations
@@ -17,7 +17,6 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from py_laravel_supervisor.appcontainer import AppContainerProfile
 from py_laravel_supervisor.framed_channel import FramedStdioChannel, _pipe_available
 from py_laravel_supervisor.windows import (
     ManagedWindowsProcess, WindowsProcessError, close_handle, create_job,
@@ -34,9 +33,6 @@ class McpFramedChannelTest(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.code, self.state = self.root / 'code', self.root / 'state'
         self.code.mkdir(); self.state.mkdir()
-        self.profile = AppContainerProfile('localgpt.' + uuid.uuid4().hex)
-        self.profile.grant_directory(self.code)
-        self.profile.grant_directory(self.state, writable=True)
         self.job = create_job('Local\\McpFramed731-' + uuid.uuid4().hex)
         self.process = None
         self.channel = None
@@ -58,7 +54,6 @@ class McpFramedChannelTest(unittest.TestCase):
                 for thread in self.channel._threads: thread.join(timeout=1)
             if self.process is not None: self.process.close()
             close_handle(self.job)
-            self.profile.close()
             self.temporary.cleanup()
 
     def start(self, source: str, **limits) -> FramedStdioChannel:
@@ -68,7 +63,7 @@ class McpFramedChannelTest(unittest.TestCase):
             **{name: str(self.state) for name in ('HOME', 'USERPROFILE', 'TEMP', 'TMP', 'APPDATA', 'LOCALAPPDATA')}}
         self.process = spawn_process([self.node, '--preserve-symlinks', '--preserve-symlinks-main', str(script)],
             cwd=self.state, environment=environment, job_handles=[self.job], exact_job_handle=self.job,
-            cleanup_job_handle=self.job, stdin_pipe=True, sandbox_sid=self.profile.sid, exact_environment=True)
+            cleanup_job_handle=self.job, stdin_pipe=True, exact_environment=True)
         self.channel = FramedStdioChannel(self.process, **limits)
         return self.channel
 

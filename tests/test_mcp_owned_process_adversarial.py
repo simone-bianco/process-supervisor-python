@@ -1,4 +1,4 @@
-"""Independent, finite Windows P0 regressions. Each fixture owns its exact Job/profile.
+"""Independent, finite Windows P0 regressions. Each fixture owns its exact Job.
 
 No MCP deployment, installer, application service or user's process is started.
 These tests exercise byte/lifecycle isolation, not JSON-RPC or gateway authority.
@@ -17,7 +17,6 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from py_laravel_supervisor.appcontainer import AppContainerProfile
 from py_laravel_supervisor.duplex import DuplexChannel
 from py_laravel_supervisor.windows import (
     ManagedWindowsProcess,
@@ -30,8 +29,8 @@ from py_laravel_supervisor.windows import (
 )
 
 
-@unittest.skipUnless(os.name == "nt", "Windows AppContainer/Job regression")
-class McpSandboxAdversarialTest(unittest.TestCase):
+@unittest.skipUnless(os.name == "nt", "Windows owned Job regression")
+class McpOwnedProcessAdversarialTest(unittest.TestCase):
     def setUp(self):
         self.node = shutil.which("node.exe")
         self.assertIsNotNone(self.node, "An already installed Node is required; tests do not install it.")
@@ -66,7 +65,6 @@ class McpSandboxAdversarialTest(unittest.TestCase):
                             thread.join(timeout=1)
                         item["process"].close()
                     close_handle(item["job"])
-                    item["profile"].close()
         self.temporary.cleanup()
         if failures:
             raise failures[0]
@@ -78,17 +76,14 @@ class McpSandboxAdversarialTest(unittest.TestCase):
         state.mkdir()
         script = code / "peer.cjs"
         script.write_text(source, encoding="utf-8")
-        profile = AppContainerProfile("localgpt." + uuid.uuid4().hex)
         job = create_job("Local\\McpQA417-" + uuid.uuid4().hex)
-        owned = {"profile": profile, "job": job, "process": None, "channel": None, "code": code, "state": state}
+        owned = {"job": job, "process": None, "channel": None, "code": code, "state": state}
         self.resources.append(owned)
-        profile.grant_directory(code)
-        profile.grant_directory(state, writable=True)
         environment = {"SystemRoot": os.environ["SystemRoot"], "WINDIR": os.environ["SystemRoot"],
                        **{key: str(state) for key in ("HOME", "USERPROFILE", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA")}}
         process = spawn_process([self.node, "--preserve-symlinks", "--preserve-symlinks-main", str(script)],
                                 cwd=state, environment=environment, job_handles=[job], exact_job_handle=job,
-                                cleanup_job_handle=job, stdin_pipe=True, sandbox_sid=profile.sid, exact_environment=True)
+                                cleanup_job_handle=job, stdin_pipe=True, exact_environment=True)
         owned["process"] = process
         owned["channel"] = DuplexChannel(process, **bounds)
         return owned
@@ -155,7 +150,7 @@ require('readline').createInterface({input:process.stdin}).on('line', line=>{
         self.assertEqual(b"{}\n", item["channel"].exchange(b"{}\n", timeout=2))
         self.assertEqual("{}\n", (item["state"] / "received.txt").read_text(encoding="utf-8"))
 
-    def test_distinct_sandboxes_do_not_share_state_and_closing_one_does_not_close_the_other(self):
+    def test_trusted_processes_share_os_authority_but_keep_separate_job_lifetimes(self):
         source = """
 const fs=require('fs');
 require('readline').createInterface({input:process.stdin}).on('line', line=>{
@@ -170,13 +165,21 @@ require('readline').createInterface({input:process.stdin}).on('line', line=>{
         sentinel.write_text("only-the-second-workspace", encoding="utf-8")
         first_result = json.loads(first["channel"].exchange(self.frame({"path": str(sentinel)}), timeout=3))
         second_result = json.loads(second["channel"].exchange(self.frame({"path": str(sentinel)}), timeout=3))
-        self.assertIn(first_result["outcome"], ["EACCES", "EPERM"])
+        self.assertEqual("allowed", first_result["outcome"])
         self.assertEqual("allowed", second_result["outcome"])
         first["channel"].close()
         self.assertEqual(0, job_active_processes(first["job"]))
         self.assertGreaterEqual(job_active_processes(second["job"]), 1)
         self.assertIsNone(second["process"].poll(), "Closing the first Job must preserve the exact second process.")
         self.assertEqual("allowed", json.loads(second["channel"].exchange(self.frame({"path": str(sentinel)}), timeout=2))["outcome"])
+
+    def test_close_waits_for_original_job_accounting_after_root_exit(self):
+        item = self.start("process.stdin.resume();setInterval(()=>{},1000);")
+        with patch('py_laravel_supervisor.duplex.job_active_processes', side_effect=[1, 1, 0]) as accounting:
+            item['channel'].close()
+        self.assertEqual(3, accounting.call_count)
+        self.assertTrue(item['channel']._closed)
+        self.assertEqual(0, job_active_processes(item['job']))
 
     def test_failed_cleanup_is_not_marked_successful_on_the_next_close(self):
         item = self.start("process.stdin.resume();setInterval(()=>{},1000);")

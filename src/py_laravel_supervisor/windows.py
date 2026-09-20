@@ -58,14 +58,6 @@ if os.name == "nt":
     class STARTUPINFOEXW(ctypes.Structure):
         _fields_ = [("StartupInfo", STARTUPINFOW), ("lpAttributeList", ctypes.c_void_p)]
 
-    class SECURITY_CAPABILITIES(ctypes.Structure):
-        _fields_ = [
-            ("AppContainerSid", ctypes.c_void_p),
-            ("Capabilities", ctypes.c_void_p),
-            ("CapabilityCount", DWORD),
-            ("Reserved", DWORD),
-        ]
-
     class PROCESS_INFORMATION(ctypes.Structure):
         _fields_ = [
             ("hProcess", HANDLE),
@@ -446,7 +438,6 @@ def spawn_process(
     create_new_process_group: bool = True,
     breakaway_from_parent_job: bool = False,
     stdin_pipe: bool = False,
-    sandbox_sid: int | None = None,
     exact_environment: bool = False,
     _post_create_hook: Callable[[int], None] | None = None,
 ) -> ManagedWindowsProcess:
@@ -456,8 +447,6 @@ def spawn_process(
         raise WindowsProcessError("command is required")
     if cleanup_job_handle not in job_handles:
         raise WindowsProcessError("cleanup Job Object must be part of the process Job list")
-    if sandbox_sid is not None and (not exact_environment or inherited_handles or breakaway_from_parent_job):
-        raise WindowsProcessError("sandbox spawn requires an exact environment and private handles")
     stdout_read = stdout_write = stderr_read = stderr_write = stdin_handle = stdin_write = None
     owned_fds: list[int] = []
     process_handle = thread_handle = None
@@ -481,7 +470,7 @@ def spawn_process(
             stderr_write = _open_nul_write(security)
 
         inheritable = [int(stdin_handle), int(stdout_write), int(stderr_write), *(inherited_handles or [])]
-        attribute_count = 1 + (1 if job_handles else 0) + (1 if sandbox_sid is not None else 0)
+        attribute_count = 1 + (1 if job_handles else 0)
         size = SIZE_T()
         _kernel32.InitializeProcThreadAttributeList(None, attribute_count, 0, ctypes.byref(size))
         attribute_buffer = ctypes.create_string_buffer(size.value)
@@ -500,13 +489,6 @@ def spawn_process(
                 attr_pointer, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, jobs_array, ctypes.sizeof(jobs_array), None, None
             ):
                 raise _win_error("unable to assign process Job Object list")
-
-        if sandbox_sid is not None:
-            security_capabilities = SECURITY_CAPABILITIES(sandbox_sid, None, 0, 0)
-            if not _kernel32.UpdateProcThreadAttribute(
-                attr_pointer, 0, 0x00020009, ctypes.byref(security_capabilities), ctypes.sizeof(security_capabilities), None, None
-            ):
-                raise _win_error("unable to configure AppContainer isolation")
 
         startup = STARTUPINFOEXW()
         startup.StartupInfo.cb = ctypes.sizeof(startup)

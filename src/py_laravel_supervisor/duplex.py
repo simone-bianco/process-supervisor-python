@@ -157,7 +157,15 @@ class DuplexChannel:
                 thread.join(timeout=1)
             if any(thread.is_alive() for thread in self._threads):
                 raise WindowsProcessError("owned channel cleanup is incomplete")
-            if self.process.job_handle is None or job_active_processes(self.process.job_handle) != 0:
+            if self.process.job_handle is None:
                 raise WindowsProcessError("owned Job quiescence is unproven")
+            # TerminateJobObject is asynchronous. The root process can signal
+            # before Windows has retired all descendants from the original Job.
+            # Wait boundedly on that exact handle, never rediscover/adopt a PID.
+            deadline = time.monotonic() + 2
+            while job_active_processes(self.process.job_handle) != 0:
+                if time.monotonic() >= deadline:
+                    raise WindowsProcessError("owned Job quiescence is unproven")
+                time.sleep(0.01)
             self.process.close()
             self._closed = True
